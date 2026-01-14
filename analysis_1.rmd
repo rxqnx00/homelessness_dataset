@@ -1,0 +1,754 @@
+---
+title: "Koreatown Homelessness and Rental Cost Analysis"
+output: html_document
+date: "`r Sys.Date()`"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Research Questions:
+
+1.  How are increases in rental housing costs associated with changes in
+    different categories of unsheltered homelessness (vehicle,
+    tent/encampment, street) in Koreatown before, during, and after
+    COVID-19?
+2.  Did rising rental costs affect rates of single-adult vs. family
+    homelessness differently in Koreatown across the same time periods?
+
+## Koreatown ZIP Codes: 90004, 90005, 90006, 90010
+
+```{r setup, message=FALSE, warning=FALSE}
+# Import necessary libraries
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(scales)
+library(gridExtra)
+library(reshape2)
+library(corrplot)
+
+# Set plotting theme
+theme_set(theme_minimal())
+
+print("Libraries imported successfully!")
+```
+
+## 1. Load and Prepare Data
+
+```{r load-data, message=FALSE, warning=FALSE}
+# Load Zillow rental price data
+zillow_df <- read_csv('/Users/ryoo/Documents/internship/homelessness_dataset/data/zillow_house_price.csv')
+
+# Koreatown ZIP codes
+ktown_zips <- c('90004', '90005', '90006', '90010')
+
+# Filter for Koreatown ZIP codes
+ktown_zillow <- zillow_df %>%
+  filter(as.character(RegionName) %in% ktown_zips)
+
+head(ktown_zillow)
+```
+
+```{r load-homeless-data, message=FALSE, warning=FALSE}
+# Load homelessness data
+homeless_df <- read_csv('data/homelessness_data/all_year.csv')
+
+cat("Homelessness data shape:", nrow(homeless_df), "x", ncol(homeless_df), "\n")
+cat("\nColumns in homelessness data:\n")
+print(names(homeless_df))
+cat("\nFirst few rows:\n")
+print(head(homeless_df))
+```
+
+```{r zip-tract-mapping, message=FALSE, warning=FALSE}
+# Get ZIP to Census Tract mapping for Koreatown using HUD API
+cat("Fetching ZIP to Census Tract Mapping...\n")
+url <- "https://www.huduser.gov/hudapi/public/usps?type=1&query=CA"
+token <- "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiI2IiwianRpIjoiOWZkMDRiYjQyOTA4ZWY4ZGRlYmM1M2Y2MmRmMTU4N2I4NzdiYmNhNGFjY2ExMTgwOWJhZmEwYjZkYzFiMjUxYTRjYzhjNDc2YTU1YTg1ZjgiLCJpYXQiOjE3NjQ3MzA2MzEuNTQzMjMsIm5iZiI6MTc2NDczMDYzMS41NDMyMzMsImV4cCI6MjA4MDI2MzQzMS41MzkxNjYsInN1YiI6IjExNDI2NSIsInNjb3BlcyI6W119.AyDAhc-GSpJ8PHtURarQon645PFiPalETUQGSQmwzxxmKdwMbfc8XSj5M0tpAmsbRZEc-OZ_qI11PnjPv4Thdw"
+
+response <- GET(url, add_headers(Authorization = paste("Bearer", token)))
+
+if (status_code(response) == 200) {
+  crosswalk_data <- content(response, "parsed")
+  crosswalk_df <- as.data.frame(do.call(rbind, crosswalk_data$data$results))
+  crosswalk_df <- crosswalk_df %>%
+    mutate_all(unlist) %>%
+    mutate(zip = as.character(zip))
+  
+  ktown_crosswalk <- crosswalk_df %>%
+    filter(zip %in% ktown_zips) %>%
+    mutate(tract = substr(as.character(geoid), nchar(as.character(geoid)) - 5, nchar(as.character(geoid))))
+  
+  cat("Found", nrow(ktown_crosswalk), "census tract mappings for Koreatown\n")
+  cat("\nSample mappings:\n")
+  print(head(ktown_crosswalk[, c('zip', 'geoid', 'tract', 'res_ratio')], 10))
+} else {
+  cat("Error fetching crosswalk data:", status_code(response), "\n")
+  ktown_crosswalk <- NULL
+}
+```
+
+```{r filter-homeless-data}
+# Filter homelessness data for Koreatown census tracts
+if (!is.null(ktown_crosswalk)) {
+  ktown_tracts <- unique(ktown_crosswalk$tract)
+  
+  # Extract tract from geoid20 (last 6 digits)
+  homeless_df <- homeless_df %>%
+    mutate(tract = substr(as.character(geoid20), nchar(as.character(geoid20)) - 5, nchar(as.character(geoid20))))
+  
+  ktown_homeless <- homeless_df %>%
+    filter(tract %in% ktown_tracts)
+  
+  head(ktown_homeless)
+}
+```
+
+## 2. Prepare Time-Series Data by COVID Period
+
+**Time Periods:** - Before COVID: Pre-2020 (2015-2019) - During COVID:
+2020-2021 - After COVID: 2022-2024
+
+```{r aggregate-homeless, message=FALSE}
+# Aggregate homelessness data by year for Koreatown
+homeless_yearly <- ktown_homeless %>%
+  group_by(year) %>%
+  summarise(
+    tot_homeless_count = sum(tot_homeless_count, na.rm = TRUE),
+    unsheltered_pop_count = sum(unsheltered_pop_count, na.rm = TRUE),
+    sheltered_pop_count = sum(sheltered_pop_count, na.rm = TRUE),
+    livingonstreet_count = sum(livingonstreet_count, na.rm = TRUE),
+    totStreetSingAdult = sum(totStreetSingAdult, na.rm = TRUE),
+    totStreetFamMem = sum(totStreetFamMem, na.rm = TRUE),
+    tot_vehicles_count = sum(tot_vehicles_count, na.rm = TRUE),
+    tot_tent_encamp_count = sum(tot_tent_encamp_count, na.rm = TRUE),
+    denom_total_pop = sum(denom_total_pop, na.rm = TRUE)
+  )
+
+# Add COVID period labels
+get_covid_period <- function(year) {
+  ifelse(year < 2020, 'Before COVID (2015-2019)',
+         ifelse(year <= 2021, 'During COVID (2020-2021)', 'After COVID (2022+)'))
+}
+
+homeless_yearly <- homeless_yearly %>%
+  mutate(period = get_covid_period(year))
+
+cat("Homelessness data aggregated by year:\n")
+print(homeless_yearly)
+```
+
+```{r process-zillow-data, message=FALSE}
+# Reshape Zillow data from wide to long format
+# Get date columns (those that match year-month pattern)
+date_cols <- names(ktown_zillow)[grepl("^\\d{4}-\\d{2}-\\d{2}$", names(ktown_zillow))]
+
+# Melt the data
+zillow_long <- ktown_zillow %>%
+  select(RegionID, RegionName, City, State, all_of(date_cols)) %>%
+  pivot_longer(cols = all_of(date_cols), names_to = "date", values_to = "rent_price") %>%
+  mutate(
+    date = as.Date(date),
+    year = year(date),
+    month = month(date)
+  )
+
+# Calculate yearly average rental price for each ZIP
+zillow_yearly <- zillow_long %>%
+  group_by(RegionName, year) %>%
+  summarise(rent_price = mean(rent_price, na.rm = TRUE), .groups = 'drop')
+
+# Calculate overall Koreatown average by year
+ktown_rent_yearly <- zillow_yearly %>%
+  group_by(year) %>%
+  summarise(avg_rent_price = mean(rent_price, na.rm = TRUE)) %>%
+  mutate(period = get_covid_period(year))
+
+cat("Rental price data by year:\n")
+print(ktown_rent_yearly)
+```
+
+```{r merge-data}
+# Merge rental and homelessness data (aggregated yearly)
+analysis_df <- homeless_yearly %>%
+  inner_join(ktown_rent_yearly, by = c("year", "period"))
+
+# Calculate rates per 100k population
+analysis_df <- analysis_df %>%
+  mutate(
+    unsheltered_rate = (unsheltered_pop_count / denom_total_pop) * 100000,
+    vehicle_rate = (tot_vehicles_count / denom_total_pop) * 100000,
+    tent_rate = (tot_tent_encamp_count / denom_total_pop) * 100000,
+    street_rate = (livingonstreet_count / denom_total_pop) * 100000,
+    single_adult_rate = (totStreetSingAdult / denom_total_pop) * 100000,
+    family_rate = (totStreetFamMem / denom_total_pop) * 100000
+  )
+
+cat("Merged analysis data:\n")
+print(analysis_df %>% 
+        select(year, period, avg_rent_price, unsheltered_pop_count, 
+               tot_vehicles_count, tot_tent_encamp_count, livingonstreet_count))
+```
+
+```{r prepare-raw-data}
+# Prepare RAW tract-level data for visualization
+raw_analysis_df <- ktown_homeless %>%
+  # Add period labels
+  mutate(period = get_covid_period(year)) %>%
+  # Merge with rental prices by year
+  left_join(ktown_rent_yearly %>% select(year, avg_rent_price), by = "year") %>%
+  # Calculate rates per 100k population for each tract
+  mutate(
+    unsheltered_rate = (unsheltered_pop_count / denom_total_pop) * 100000,
+    vehicle_rate = (tot_vehicles_count / denom_total_pop) * 100000,
+    tent_rate = (tot_tent_encamp_count / denom_total_pop) * 100000,
+    street_rate = (livingonstreet_count / denom_total_pop) * 100000,
+    single_adult_rate = (totStreetSingAdult / denom_total_pop) * 100000,
+    family_rate = (totStreetFamMem / denom_total_pop) * 100000
+  ) %>%
+  # Remove rows with NA or infinite rates
+  filter(!is.na(avg_rent_price), !is.infinite(vehicle_rate), !is.infinite(tent_rate),
+         !is.infinite(street_rate), !is.infinite(unsheltered_rate))
+
+cat("\nRaw tract-level data prepared for visualization:\n")
+cat("Total observations:", nrow(raw_analysis_df), "\n")
+cat("Unique census tracts:", length(unique(raw_analysis_df$tract)), "\n")
+cat("Years covered:", paste(sort(unique(raw_analysis_df$year)), collapse = ", "), "\n")
+```
+
+## 3. Analysis - Question 1: Rental Costs vs. Unsheltered Homelessness Categories
+
+Examining the relationship between rental prices and different types of
+unsheltered homelessness (vehicles, tents/encampments, street) across
+COVID periods.
+
+```{r correlations-q1}
+# Calculate correlations by COVID period for Question 1
+cat(paste(rep("=", 80), collapse = ""), "\n")
+cat("CORRELATION ANALYSIS: Rental Costs vs. Unsheltered Homelessness Categories\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+for (period in unique(analysis_df$period)) {
+  period_data <- analysis_df %>% filter(period == !!period)
+  
+  if (nrow(period_data) >= 2) {  # Need at least 2 points for correlation
+    cat(paste0(period, ":\n"))
+    cat("  Sample size:", nrow(period_data), "years\n")
+    
+    # Correlation with vehicle homelessness
+    if (sum(period_data$tot_vehicles_count) > 0) {
+      corr_vehicle <- cor(period_data$avg_rent_price, period_data$vehicle_rate, use = "complete.obs")
+      cat(sprintf("  Rent vs Vehicle homelessness: r = %.3f\n", corr_vehicle))
+    }
+    
+    # Correlation with tent/encampment homelessness
+    if (sum(period_data$tot_tent_encamp_count) > 0) {
+      corr_tent <- cor(period_data$avg_rent_price, period_data$tent_rate, use = "complete.obs")
+      cat(sprintf("  Rent vs Tent/Encampment: r = %.3f\n", corr_tent))
+    }
+    
+    # Correlation with street homelessness
+    if (sum(period_data$livingonstreet_count) > 0) {
+      corr_street <- cor(period_data$avg_rent_price, period_data$street_rate, use = "complete.obs")
+      cat(sprintf("  Rent vs Street: r = %.3f\n", corr_street))
+    }
+    cat("\n")
+  }
+}
+
+cat(paste(rep("=", 80), collapse = ""), "\n")
+```
+
+```{r viz-q1-timeseries, fig.width=14, fig.height=8}
+# Visualization 1: Single time series graph with all categories and dual y-axes
+period_colors <- c('Before COVID (2015-2019)' = '#3498db',
+                   'During COVID (2020-2021)' = '#e74c3c',
+                   'After COVID (2022+)' = '#2ecc71')
+
+# Calculate scaling factor for dual y-axis
+max_rent <- max(analysis_df$avg_rent_price, na.rm = TRUE)
+max_count <- max(c(analysis_df$tot_vehicles_count, analysis_df$tot_tent_encamp_count, 
+                   analysis_df$livingonstreet_count, analysis_df$unsheltered_pop_count), na.rm = TRUE)
+
+# Create combined plot
+p1 <- ggplot(analysis_df, aes(x = year)) +
+  # Homelessness categories (left y-axis)
+  geom_line(aes(y = tot_vehicles_count, color = "Vehicle"), linewidth = 1.2) +
+  geom_point(aes(y = tot_vehicles_count, color = "Vehicle"), size = 3) +
+  geom_line(aes(y = tot_tent_encamp_count, color = "Tent/Encampment"), linewidth = 1.2) +
+  geom_point(aes(y = tot_tent_encamp_count, color = "Tent/Encampment"), size = 3) +
+  geom_line(aes(y = livingonstreet_count, color = "Street"), linewidth = 1.2) +
+  geom_point(aes(y = livingonstreet_count, color = "Street"), size = 3) +
+  # Rental price (right y-axis, scaled)
+  geom_line(aes(y = avg_rent_price * max_count / max_rent, color = "Rental Price"), 
+            linewidth = 1.5, linetype = "dashed") +
+  geom_point(aes(y = avg_rent_price * max_count / max_rent, color = "Rental Price"), 
+             size = 4, shape = 17) +
+  scale_y_continuous(
+    name = "Homelessness Count",
+    sec.axis = sec_axis(~ . * max_rent / max_count, name = "Average Rental Price ($)")
+  ) +
+  scale_color_manual(values = c(
+    "Vehicle" = "#3498db",
+    "Tent/Encampment" = "#2ecc71",
+    "Street" = "#9b59b6",
+    "Rental Price" = "#e74c3c"
+  )) +
+  labs(x = "Year", 
+       title = "Homelessness Categories and Rental Costs Over Time in Koreatown",
+       color = "Category") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+        legend.position = "bottom",
+        legend.title = element_text(face = "bold"),
+        axis.title.y.left = element_text(color = "black", face = "bold"),
+        axis.title.y.right = element_text(color = "#e74c3c", face = "bold"))
+
+print(p1)
+
+ggsave('figures/q1_timeseries.png', width = 14, height = 8, dpi = 300)
+cat("Figure saved to: figures/q1_timeseries.png\n")
+```
+
+```{r viz-q1-correlations, fig.width=18, fig.height=5}
+# Visualization 2: Scatter plots showing correlation between rent and each category (using rates)
+p1 <- ggplot(analysis_df, aes(x = avg_rent_price, y = vehicle_rate, color = period)) +
+  geom_point(size = 5, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed", alpha = 0.5) +
+  scale_color_manual(values = period_colors) +
+  labs(x = "Average Rental Price ($)", y = "Vehicle Homelessness Rate (per 100k)",
+       title = "Rent vs. Vehicle Homelessness Rate") +
+  theme(plot.title = element_text(face = "bold", size = 13),
+        legend.position = "bottom")
+
+p2 <- ggplot(analysis_df, aes(x = avg_rent_price, y = tent_rate, color = period)) +
+  geom_point(size = 5, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed", alpha = 0.5) +
+  scale_color_manual(values = period_colors) +
+  labs(x = "Average Rental Price ($)", y = "Tent/Encampment Rate (per 100k)",
+       title = "Rent vs. Tent/Encampment Rate") +
+  theme(plot.title = element_text(face = "bold", size = 13),
+        legend.position = "bottom")
+
+p3 <- ggplot(analysis_df, aes(x = avg_rent_price, y = street_rate, color = period)) +
+  geom_point(size = 5, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed", alpha = 0.5) +
+  scale_color_manual(values = period_colors) +
+  labs(x = "Average Rental Price ($)", y = "Street Homelessness Count",
+       title = "Rent vs. Street Homelessness") +
+  theme(plot.title = element_text(face = "bold", size = 13),
+        legend.position = "bottom")
+
+grid.arrange(p1, p2, p3, ncol = 3,
+             top = grid::textGrob("Correlation: Rental Prices vs. Unsheltered Homelessness Types",
+                                  gp = grid::gpar(fontsize = 16, fontface = "bold")))
+
+ggsave('figures/q1_correlations.png', width = 18, height = 5, dpi = 300)
+cat("Figure saved to: figures/q1_correlations.png\n")
+```
+
+```{r viz-percentage-change, fig.width=14, fig.height=8}
+# Visualization: Percentage Change from Baseline (2015)
+# Calculate percentage change from the first year (baseline)
+baseline_year <- min(analysis_df$year)
+baseline_data <- analysis_df %>% filter(year == baseline_year)
+
+pct_change_df <- analysis_df %>%
+  mutate(
+    pct_rent = ((avg_rent_price - baseline_data$avg_rent_price[1]) / baseline_data$avg_rent_price[1]) * 100,
+    pct_vehicle = ((tot_vehicles_count - baseline_data$tot_vehicles_count[1]) / 
+                    ifelse(baseline_data$tot_vehicles_count[1] == 0, 1, baseline_data$tot_vehicles_count[1])) * 100,
+    pct_tent = ((tot_tent_encamp_count - baseline_data$tot_tent_encamp_count[1]) / 
+                 ifelse(baseline_data$tot_tent_encamp_count[1] == 0, 1, baseline_data$tot_tent_encamp_count[1])) * 100,
+    pct_street = ((livingonstreet_count - baseline_data$livingonstreet_count[1]) / 
+                   ifelse(baseline_data$livingonstreet_count[1] == 0, 1, baseline_data$livingonstreet_count[1])) * 100,
+    pct_unsheltered = ((unsheltered_pop_count - baseline_data$unsheltered_pop_count[1]) / 
+                        baseline_data$unsheltered_pop_count[1]) * 100
+  )
+
+# Reshape for plotting
+pct_long <- pct_change_df %>%
+  select(year, pct_rent, pct_vehicle, pct_tent, pct_street) %>%
+  pivot_longer(cols = -year, names_to = "category", values_to = "pct_change") %>%
+  mutate(category = recode(category,
+                           "pct_rent" = "Rental Price",
+                           "pct_vehicle" = "Vehicle",
+                           "pct_tent" = "Tent/Encampment",
+                           "pct_street" = "Street",
+                           "pct_unsheltered" = "Total Unsheltered"))
+
+# Create percentage change plot
+ggplot(pct_long, aes(x = year, y = pct_change, color = category, group = category)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.8) +
+  geom_line(linewidth = 1.3) +
+  geom_point(size = 3.5) +
+  scale_color_manual(values = c(
+    "Rental Price" = "#e74c3c",
+    "Vehicle" = "#3498db",
+    "Tent/Encampment" = "#2ecc71",
+    "Street" = "#9b59b6",
+    "Total Unsheltered" = "#f39c12"
+  )) +
+  labs(x = "Year", 
+       y = paste0("Percentage Change from Baseline (", baseline_year, ")"),
+       title = paste0("Percentage Change in Rental Prices and Homelessness Categories (Baseline: ", baseline_year, ")"),
+       color = "Category") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        legend.position = "bottom",
+        legend.title = element_text(face = "bold"),
+        panel.grid.major = element_line(color = "gray90"),
+        panel.grid.minor = element_line(color = "gray95")) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"))
+
+ggsave('figures/percentage_change.png', width = 14, height = 8, dpi = 300)
+cat("Figure saved to: figures/percentage_change.png\n")
+```
+
+## 4. Analysis - Question 2: Single-Adult vs. Family Homelessness
+
+Comparing how rental costs affected single-adult versus family
+homelessness rates across COVID periods.
+
+```{r correlations-q2}
+# Calculate correlations by COVID period for Question 2
+cat(paste(rep("=", 80), collapse = ""), "\n")
+cat("CORRELATION ANALYSIS: Rental Costs vs. Single-Adult and Family Homelessness\n")
+cat(paste(rep("=", 80), collapse = ""), "\n\n")
+
+for (period in unique(analysis_df$period)) {
+  period_data <- analysis_df %>% filter(period == !!period)
+  
+  if (nrow(period_data) >= 2) {
+    cat(paste0(period, ":\n"))
+    cat("  Sample size:", nrow(period_data), "years\n")
+    
+    # Correlation with single adult homelessness
+    if (sum(period_data$totStreetSingAdult) > 0) {
+      corr_single <- cor(period_data$avg_rent_price, period_data$single_adult_rate, use = "complete.obs")
+      cat(sprintf("  Rent vs Single-Adult homelessness: r = %.3f\n", corr_single))
+    }
+    
+    # Correlation with family homelessness
+    if (sum(period_data$totStreetFamMem) > 0) {
+      corr_family <- cor(period_data$avg_rent_price, period_data$family_rate, use = "complete.obs")
+      cat(sprintf("  Rent vs Family homelessness: r = %.3f\n", corr_family))
+    }
+    
+    # Calculate ratio
+    total_single <- sum(period_data$totStreetSingAdult)
+    total_family <- sum(period_data$totStreetFamMem)
+    cat("  Single Adults:", total_single, "\n")
+    cat("  Family Members:", total_family, "\n")
+    if (total_family > 0) {
+      ratio <- total_single / total_family
+      cat(sprintf("  Single-to-Family Ratio: %.2f\n", ratio))
+    }
+    cat("\n")
+  }
+}
+
+cat(paste(rep("=", 80), collapse = ""), "\n")
+```
+
+```{r viz-q2-single-family, fig.width=16, fig.height=12}
+# Visualization 3: Single Adult vs Family Homelessness Comparison
+# Note: R implementation combines multiple plots similar to Python version
+
+# Plot 1: Time series comparison (dual axis)
+p1 <- ggplot(analysis_df, aes(x = year)) +
+  geom_line(aes(y = avg_rent_price / 10, color = "Avg Rental Price"), linewidth = 1.5) +
+  geom_point(aes(y = avg_rent_price / 10, color = "Avg Rental Price"), size = 4) +
+  geom_line(aes(y = totStreetSingAdult, color = "Single Adults"), linewidth = 1.2) +
+  geom_point(aes(y = totStreetSingAdult, color = "Single Adults"), size = 3, shape = 15) +
+  geom_line(aes(y = totStreetFamMem, color = "Family"), linewidth = 1.2) +
+  geom_point(aes(y = totStreetFamMem, color = "Family"), size = 3, shape = 17) +
+  scale_y_continuous(
+    name = "Homeless Count",
+    sec.axis = sec_axis(~.*10, name = "Average Rental Price ($)")
+  ) +
+  scale_color_manual(values = c("Avg Rental Price" = "#e74c3c",
+                                 "Single Adults" = "#3498db",
+                                 "Family" = "#2ecc71")) +
+  labs(x = "Year", title = "Rental Price vs. Single-Adult & Family Homelessness") +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.title = element_blank(),
+        legend.position = "bottom")
+
+ggsave('figures/q2_single_vs_family1.png')
+
+# Plot 2: Scatter - Rent vs Single Adult (using rate)
+p2 <- ggplot(analysis_df, aes(x = avg_rent_price, y = single_adult_rate, color = period)) +
+  geom_point(size = 6, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed", alpha = 0.5) +
+  scale_color_manual(values = period_colors) +
+  labs(x = "Average Rental Price ($)", y = "Single-Adult Homelessness Rate (per 100k)",
+       title = "Rent vs. Single-Adult Homelessness Rate") +
+  theme(plot.title = element_text(face = "bold", size = 13),
+        legend.position = "bottom")
+
+# Plot 3: Scatter - Rent vs Family (using rate)
+p3 <- ggplot(analysis_df, aes(x = avg_rent_price, y = family_rate, color = period)) +
+  geom_point(size = 6, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed", alpha = 0.5) +
+  scale_color_manual(values = period_colors) +
+  labs(x = "Average Rental Price ($)", y = "Family Homelessness Rate (per 100k)",
+       title = "Rent vs. Family Homelessness Rate") +
+  theme(plot.title = element_text(face = "bold", size = 13),
+        legend.position = "bottom")
+
+# Plot 4: Scatter plot - Single Adult Rate vs Family Rate
+p4 <- ggplot(analysis_df, aes(x = single_adult_rate, y = family_rate, color = period)) +
+  geom_point(size = 6, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "darkgray", linetype = "dashed", alpha = 0.5) +
+  scale_color_manual(values = period_colors) +
+  labs(x = "Single-Adult Homelessness Rate (per 100k)", 
+       y = "Family Homelessness Rate (per 100k)",
+       title = "Single-Adult vs. Family Homelessness Rates") +
+  theme(plot.title = element_text(face = "bold", size = 13),
+        legend.title = element_blank(),
+        legend.position = "bottom")
+
+grid.arrange(p1, p2, p3, p4, ncol = 2,
+             top = grid::textGrob("Single-Adult vs. Family Homelessness and Rental Costs in Koreatown",
+                                  gp = grid::gpar(fontsize = 16, fontface = "bold")))
+
+cat("Figure saved to: figures/q2_single_vs_family.png\n")
+```
+
+## 5. Summary Statistics and Comprehensive Analysis
+
+```{r summary-stats}
+# Create comprehensive summary table
+cat(paste(rep("=", 100), collapse = ""), "\n")
+cat("COMPREHENSIVE SUMMARY: Koreatown Homelessness and Rental Costs by COVID Period\n")
+cat(paste(rep("=", 100), collapse = ""), "\n\n")
+
+summary_stats <- analysis_df %>%
+  group_by(period) %>%
+  summarise(
+    years_min = min(year),
+    years_max = max(year),
+    years_count = n(),
+    rent_mean = mean(avg_rent_price),
+    rent_min = min(avg_rent_price),
+    rent_max = max(avg_rent_price),
+    vehicles_sum = sum(tot_vehicles_count),
+    vehicles_mean = mean(tot_vehicles_count),
+    tent_sum = sum(tot_tent_encamp_count),
+    tent_mean = mean(tot_tent_encamp_count),
+    street_sum = sum(livingonstreet_count),
+    street_mean = mean(livingonstreet_count),
+    single_sum = sum(totStreetSingAdult),
+    single_mean = mean(totStreetSingAdult),
+    family_sum = sum(totStreetFamMem),
+    family_mean = mean(totStreetFamMem),
+    unsheltered_sum = sum(unsheltered_pop_count),
+    unsheltered_mean = mean(unsheltered_pop_count)
+  )
+
+cat("\nSummary Statistics by COVID Period:\n")
+print(summary_stats)
+
+# Calculate percent changes
+cat("\n", paste(rep("=", 100), collapse = ""), "\n")
+cat("PERCENT CHANGES ACROSS PERIODS\n")
+cat(paste(rep("=", 100), collapse = ""), "\n\n")
+
+periods <- c('Before COVID (2015-2019)', 'During COVID (2020-2021)', 'After COVID (2022+)')
+metrics <- list(
+  'Rental Price' = 'avg_rent_price',
+  'Vehicle Homelessness' = 'tot_vehicles_count',
+  'Tent/Encampment' = 'tot_tent_encamp_count',
+  'Street Homelessness' = 'livingonstreet_count',
+  'Single Adults' = 'totStreetSingAdult',
+  'Family Members' = 'totStreetFamMem'
+)
+
+for (metric_name in names(metrics)) {
+  col <- metrics[[metric_name]]
+  cat(paste0("\n", metric_name, ":\n"))
+  
+  for (i in 1:(length(periods) - 1)) {
+    before_val <- mean(analysis_df %>% filter(period == periods[i]) %>% pull(!!sym(col)))
+    after_val <- mean(analysis_df %>% filter(period == periods[i+1]) %>% pull(!!sym(col)))
+    
+    if (before_val > 0) {
+      pct_change <- ((after_val - before_val) / before_val) * 100
+      cat(sprintf("  %s → %s: %+.1f%%\n", periods[i], periods[i+1], pct_change))
+    } else {
+      cat(sprintf("  %s → %s: N/A (no data)\n", periods[i], periods[i+1]))
+    }
+  }
+}
+
+cat("\n", paste(rep("=", 100), collapse = ""), "\n")
+```
+
+```{r viz-heatmap, fig.width=12, fig.height=8}
+# Create comprehensive heatmap showing all correlations
+correlation_data <- data.frame()
+
+for (period in unique(analysis_df$period)) {
+  period_data <- analysis_df %>% filter(period == !!period)
+  
+  if (nrow(period_data) >= 2) {
+    corr_vehicle <- cor(period_data$avg_rent_price, period_data$vehicle_rate, use = "complete.obs")
+    corr_tent <- cor(period_data$avg_rent_price, period_data$tent_rate, use = "complete.obs")
+    corr_street <- cor(period_data$avg_rent_price, period_data$street_rate, use = "complete.obs")
+    corr_single <- cor(period_data$avg_rent_price, period_data$single_adult_rate, use = "complete.obs")
+    corr_family <- ifelse(sum(period_data$totStreetFamMem) > 0,
+                          cor(period_data$avg_rent_price, period_data$family_rate, use = "complete.obs"),
+                          NA)
+    
+    correlation_data <- rbind(correlation_data, data.frame(
+      period = period,
+      Vehicle = corr_vehicle,
+      `Tent/Encampment` = corr_tent,
+      Street = corr_street,
+      `Single Adult` = corr_single,
+      Family = corr_family,
+      check.names = FALSE
+    ))
+  }
+}
+
+# Create matrix for heatmap
+corr_matrix <- as.matrix(correlation_data[, -1])
+rownames(corr_matrix) <- gsub(" ", "\n", correlation_data$period)
+
+# Melt for ggplot
+corr_melted <- melt(corr_matrix)
+names(corr_melted) <- c("Period", "Category", "Correlation")
+
+ggplot(corr_melted, aes(x = Category, y = Period, fill = Correlation)) +
+  geom_tile(color = "white", linewidth = 2) +
+  geom_text(aes(label = sprintf("%.3f", Correlation)), size = 5) +
+  scale_fill_gradient2(low = "#d73027", mid = "#ffffbf", high = "#1a9850",
+                       midpoint = 0, limit = c(-1, 1),
+                       name = "Correlation\nCoefficient") +
+  labs(title = "Correlation: Rental Prices vs. Homelessness Rates (per 100k) by COVID Period",
+       x = "Homelessness Category",
+       y = "COVID Period") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+        axis.title = element_text(face = "bold", size = 13),
+        axis.text.x = element_text(size = 11),
+        axis.text.y = element_text(size = 11))
+
+ggsave('figures/correlation_heatmap.png', width = 12, height = 8, dpi = 300)
+cat("Figure saved to: figures/correlation_heatmap.png\n")
+```
+
+```{r viz-comprehensive, fig.width=18, fig.height=10, warning=FALSE}
+# Create a combined visualization showing rental price changes and homelessness trends
+# Note: This is a simplified version of the Python comprehensive plot
+# R's grid system can be used for more complex layouts if needed
+
+# Main dual-axis plot
+p_main <- ggplot(analysis_df, aes(x = year)) +
+  geom_ribbon(aes(ymin = 0, ymax = avg_rent_price / 50), fill = "#e74c3c", alpha = 0.2) +
+  geom_line(aes(y = avg_rent_price / 50, color = "Rental Price"), linewidth = 2) +
+  geom_point(aes(y = avg_rent_price / 50, color = "Rental Price"), size = 5) +
+  geom_ribbon(aes(ymin = 0, ymax = unsheltered_pop_count), fill = "#3498db", alpha = 0.2) +
+  geom_line(aes(y = unsheltered_pop_count, color = "Unsheltered"), linewidth = 2) +
+  geom_point(aes(y = unsheltered_pop_count, color = "Unsheltered"), size = 5, shape = 15) +
+  scale_color_manual(values = c("Rental Price" = "#e74c3c", "Unsheltered" = "#3498db")) +
+  scale_y_continuous(
+    name = "Unsheltered Homelessness Count",
+    sec.axis = sec_axis(~.*50, name = "Average Rental Price ($)")
+  ) +
+  labs(x = "Year",
+       title = "Koreatown: Rental Prices and Unsheltered Homelessness Trends") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 16),
+        legend.title = element_blank(),
+        legend.position = "top")
+
+# Category breakdowns
+p_vehicle <- ggplot(analysis_df, aes(x = factor(year), y = tot_vehicles_count, fill = period)) +
+  geom_bar(stat = "identity", alpha = 0.7) +
+  scale_fill_manual(values = period_colors) +
+  labs(x = "Year", y = "Count", title = "Vehicle Homelessness") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12),
+        legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave('figures/vehicle.png')
+
+p_tent <- ggplot(analysis_df, aes(x = factor(year), y = tot_tent_encamp_count, fill = period)) +
+  geom_bar(stat = "identity", alpha = 0.7) +
+  scale_fill_manual(values = period_colors) +
+  labs(x = "Year", y = "Count", title = "Tent/Encampment") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12),
+        legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave('figures/tent.png')
+
+p_street <- ggplot(analysis_df, aes(x = factor(year), y = livingonstreet_count, fill = period)) +
+  geom_bar(stat = "identity", alpha = 0.7) +
+  scale_fill_manual(values = period_colors) +
+  labs(x = "Year", y = "Count", title = "Street Homelessness") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12),
+        legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave('figures/street.png')
+
+# Single vs Family trend
+p_single_family <- ggplot(analysis_df, aes(x = year)) +
+  geom_line(aes(y = totStreetSingAdult, color = "Single Adults"), linewidth = 1.5) +
+  geom_point(aes(y = totStreetSingAdult, color = "Single Adults"), size = 4) +
+  geom_line(aes(y = totStreetFamMem, color = "Family Members"), linewidth = 1.5) +
+  geom_point(aes(y = totStreetFamMem, color = "Family Members"), size = 4, shape = 15) +
+  scale_color_manual(values = c("Single Adults" = "#9b59b6", "Family Members" = "#f39c12")) +
+  labs(x = "Year", y = "Count", title = "Single-Adult vs. Family Homelessness") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12),
+        legend.title = element_blank(),
+        legend.position = "bottom")
+
+# Arrange all plots
+layout_matrix <- rbind(c(1, 1, 1),
+                       c(2, 3, 4),
+                       c(5, 5, 5))
+
+grid.arrange(p_main, p_vehicle, p_tent, p_street, p_single_family,
+             layout_matrix = layout_matrix,
+             top = grid::textGrob("Comprehensive Analysis: Koreatown Homelessness and Rental Costs",
+                                  gp = grid::gpar(fontsize = 18, fontface = "bold")))
+
+ggsave('figures/comprehensive_analysis.png', width = 18, height = 10, dpi = 300)
+cat("Figure saved to: figures/comprehensive_analysis.png\n")
+```
+
+## 6. Key Findings and Conclusions
+
+### Research Question 1: Rental Costs vs. Unsheltered Homelessness Categories
+
+**Key Findings:** - The analysis examines the relationship between
+rental housing costs and three categories of unsheltered homelessness
+(vehicle, tent/encampment, street) across three COVID periods -
+Correlation coefficients and trend visualizations reveal how different
+types of unsheltered homelessness respond to rental price changes -
+Time-series graphs show the evolution of each category before, during,
+and after COVID-19
+
+### Research Question 2: Single-Adult vs. Family Homelessness
+
+**Key Findings:** - Comparison of how rental costs affected single-adult
+versus family homelessness differently across COVID periods - Ratio
+analysis shows the relative prevalence of single adults compared to
+families - Correlation analysis reveals whether single adults or
+families were more vulnerable to rental price increases
+
+### Overall Insights:
+
+-   Visual evidence from scatter plots and time series shows trends
+    across different periods
+-   The heatmap provides a comprehensive view of all correlations at a
+    glance
+-   Period-specific analysis reveals how the pandemic may have altered
+    the relationship between housing costs and homelessness
