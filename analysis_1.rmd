@@ -27,6 +27,7 @@ library(scales)
 library(gridExtra)
 library(reshape2)
 library(corrplot)
+library(httr)
 
 # Set plotting theme
 theme_set(theme_minimal())
@@ -41,7 +42,7 @@ print("Libraries imported successfully!")
 zillow_df <- read_csv('/Users/ryoo/Documents/internship/homelessness_dataset/data/zillow_house_price.csv')
 
 # Koreatown ZIP codes
-ktown_zips <- c('90004', '90005', '90006', '90010')
+ktown_zips <- c('90004', '90005', '90006', '90010', '90019', '90020')
 
 # Filter for Koreatown ZIP codes
 ktown_zillow <- zillow_df %>%
@@ -60,6 +61,7 @@ print(names(homeless_df))
 cat("\nFirst few rows:\n")
 print(head(homeless_df))
 ```
+
 
 ```{r zip-tract-mapping, message=FALSE, warning=FALSE}
 # Get ZIP to Census Tract mapping for Koreatown using HUD API
@@ -100,6 +102,19 @@ if (!is.null(ktown_crosswalk)) {
   
   ktown_homeless <- homeless_df %>%
     filter(tract %in% ktown_tracts)
+  
+  # Diagnostic: Check what years we have data for
+  cat("\n=== DATA DIAGNOSTIC ===\n")
+  cat("Available years in homeless data:\n")
+  print(sort(unique(ktown_homeless$year)))
+  cat("\nCounts by year:\n")
+  print(ktown_homeless %>% 
+          group_by(year) %>% 
+          summarise(
+            n_tracts = n(),
+            total_homeless = sum(tot_homeless_count, na.rm = TRUE),
+            total_unsheltered = sum(unsheltered_pop_count, na.rm = TRUE)
+          ))
   
   head(ktown_homeless)
 }
@@ -167,12 +182,22 @@ ktown_rent_yearly <- zillow_yearly %>%
 
 cat("Rental price data by year:\n")
 print(ktown_rent_yearly)
+
+cat("\n=== ZILLOW DATA DIAGNOSTIC ===\n")
+cat("Zillow years available:\n")
+print(sort(unique(ktown_rent_yearly$year)))
 ```
 
 ```{r merge-data}
 # Merge rental and homelessness data (aggregated yearly)
 analysis_df <- homeless_yearly %>%
   inner_join(ktown_rent_yearly, by = c("year", "period"))
+
+cat("\n=== MERGE DIAGNOSTIC ===\n")
+cat("Years after merge (inner join):\n")
+print(sort(unique(analysis_df$year)))
+cat("\nThis shows which years have BOTH homeless AND rental data\n")
+cat("If 2024 is missing here, it means either homeless or rental data is missing for 2024\n")
 
 # Calculate rates per 100k population
 analysis_df <- analysis_df %>%
@@ -311,101 +336,6 @@ ggsave('figures/q1_timeseries.png', width = 14, height = 8, dpi = 300)
 cat("Figure saved to: figures/q1_timeseries.png\n")
 ```
 
-```{r viz-q1-correlations, fig.width=18, fig.height=5}
-# Visualization 2: Scatter plots showing correlation between rent and each category (using rates)
-p1 <- ggplot(analysis_df, aes(x = avg_rent_price, y = vehicle_rate, color = period)) +
-  geom_point(size = 5, alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed", alpha = 0.5) +
-  scale_color_manual(values = period_colors) +
-  labs(x = "Average Rental Price ($)", y = "Vehicle Homelessness Rate (per 100k)",
-       title = "Rent vs. Vehicle Homelessness Rate") +
-  theme(plot.title = element_text(face = "bold", size = 13),
-        legend.position = "bottom")
-
-p2 <- ggplot(analysis_df, aes(x = avg_rent_price, y = tent_rate, color = period)) +
-  geom_point(size = 5, alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed", alpha = 0.5) +
-  scale_color_manual(values = period_colors) +
-  labs(x = "Average Rental Price ($)", y = "Tent/Encampment Rate (per 100k)",
-       title = "Rent vs. Tent/Encampment Rate") +
-  theme(plot.title = element_text(face = "bold", size = 13),
-        legend.position = "bottom")
-
-p3 <- ggplot(analysis_df, aes(x = avg_rent_price, y = street_rate, color = period)) +
-  geom_point(size = 5, alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed", alpha = 0.5) +
-  scale_color_manual(values = period_colors) +
-  labs(x = "Average Rental Price ($)", y = "Street Homelessness Count",
-       title = "Rent vs. Street Homelessness") +
-  theme(plot.title = element_text(face = "bold", size = 13),
-        legend.position = "bottom")
-
-grid.arrange(p1, p2, p3, ncol = 3,
-             top = grid::textGrob("Correlation: Rental Prices vs. Unsheltered Homelessness Types",
-                                  gp = grid::gpar(fontsize = 16, fontface = "bold")))
-
-ggsave('figures/q1_correlations.png', width = 18, height = 5, dpi = 300)
-cat("Figure saved to: figures/q1_correlations.png\n")
-```
-
-```{r viz-percentage-change, fig.width=14, fig.height=8}
-# Visualization: Percentage Change from Baseline (2015)
-# Calculate percentage change from the first year (baseline)
-baseline_year <- min(analysis_df$year)
-baseline_data <- analysis_df %>% filter(year == baseline_year)
-
-pct_change_df <- analysis_df %>%
-  mutate(
-    pct_rent = ((avg_rent_price - baseline_data$avg_rent_price[1]) / baseline_data$avg_rent_price[1]) * 100,
-    pct_vehicle = ((tot_vehicles_count - baseline_data$tot_vehicles_count[1]) / 
-                    ifelse(baseline_data$tot_vehicles_count[1] == 0, 1, baseline_data$tot_vehicles_count[1])) * 100,
-    pct_tent = ((tot_tent_encamp_count - baseline_data$tot_tent_encamp_count[1]) / 
-                 ifelse(baseline_data$tot_tent_encamp_count[1] == 0, 1, baseline_data$tot_tent_encamp_count[1])) * 100,
-    pct_street = ((livingonstreet_count - baseline_data$livingonstreet_count[1]) / 
-                   ifelse(baseline_data$livingonstreet_count[1] == 0, 1, baseline_data$livingonstreet_count[1])) * 100,
-    pct_unsheltered = ((unsheltered_pop_count - baseline_data$unsheltered_pop_count[1]) / 
-                        baseline_data$unsheltered_pop_count[1]) * 100
-  )
-
-# Reshape for plotting
-pct_long <- pct_change_df %>%
-  select(year, pct_rent, pct_vehicle, pct_tent, pct_street) %>%
-  pivot_longer(cols = -year, names_to = "category", values_to = "pct_change") %>%
-  mutate(category = recode(category,
-                           "pct_rent" = "Rental Price",
-                           "pct_vehicle" = "Vehicle",
-                           "pct_tent" = "Tent/Encampment",
-                           "pct_street" = "Street",
-                           "pct_unsheltered" = "Total Unsheltered"))
-
-# Create percentage change plot
-ggplot(pct_long, aes(x = year, y = pct_change, color = category, group = category)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.8) +
-  geom_line(linewidth = 1.3) +
-  geom_point(size = 3.5) +
-  scale_color_manual(values = c(
-    "Rental Price" = "#e74c3c",
-    "Vehicle" = "#3498db",
-    "Tent/Encampment" = "#2ecc71",
-    "Street" = "#9b59b6",
-    "Total Unsheltered" = "#f39c12"
-  )) +
-  labs(x = "Year", 
-       y = paste0("Percentage Change from Baseline (", baseline_year, ")"),
-       title = paste0("Percentage Change in Rental Prices and Homelessness Categories (Baseline: ", baseline_year, ")"),
-       color = "Category") +
-  theme_minimal() +
-  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-        legend.position = "bottom",
-        legend.title = element_text(face = "bold"),
-        panel.grid.major = element_line(color = "gray90"),
-        panel.grid.minor = element_line(color = "gray95")) +
-  scale_y_continuous(labels = function(x) paste0(x, "%"))
-
-ggsave('figures/percentage_change.png', width = 14, height = 8, dpi = 300)
-cat("Figure saved to: figures/percentage_change.png\n")
-```
-
 ## 4. Analysis - Question 2: Single-Adult vs. Family Homelessness
 
 Comparing how rental costs affected single-adult versus family
@@ -452,7 +382,7 @@ for (period in unique(analysis_df$period)) {
 cat(paste(rep("=", 80), collapse = ""), "\n")
 ```
 
-```{r viz-q2-single-family, fig.width=16, fig.height=12}
+```{r viz-q2-single-family}
 # Visualization 3: Single Adult vs Family Homelessness Comparison
 # Note: R implementation combines multiple plots similar to Python version
 
@@ -462,21 +392,17 @@ p1 <- ggplot(analysis_df, aes(x = year)) +
   geom_point(aes(y = avg_rent_price / 10, color = "Avg Rental Price"), size = 4) +
   geom_line(aes(y = totStreetSingAdult, color = "Single Adults"), linewidth = 1.2) +
   geom_point(aes(y = totStreetSingAdult, color = "Single Adults"), size = 3, shape = 15) +
-  geom_line(aes(y = totStreetFamMem, color = "Family"), linewidth = 1.2) +
-  geom_point(aes(y = totStreetFamMem, color = "Family"), size = 3, shape = 17) +
   scale_y_continuous(
     name = "Homeless Count",
     sec.axis = sec_axis(~.*10, name = "Average Rental Price ($)")
   ) +
   scale_color_manual(values = c("Avg Rental Price" = "#e74c3c",
-                                 "Single Adults" = "#3498db",
-                                 "Family" = "#2ecc71")) +
-  labs(x = "Year", title = "Rental Price vs. Single-Adult & Family Homelessness") +
+                                 "Single Adults" = "#3498db")) +
+  labs(x = "Year", title = "Rental Price vs. Single-Adult Homelessness") +
   theme(plot.title = element_text(face = "bold", size = 14),
         legend.title = element_blank(),
         legend.position = "bottom")
 
-ggsave('figures/q2_single_vs_family1.png')
 
 # Plot 2: Scatter - Rent vs Single Adult (using rate)
 p2 <- ggplot(analysis_df, aes(x = avg_rent_price, y = single_adult_rate, color = period)) +
@@ -510,11 +436,10 @@ p4 <- ggplot(analysis_df, aes(x = single_adult_rate, y = family_rate, color = pe
         legend.title = element_blank(),
         legend.position = "bottom")
 
-grid.arrange(p1, p2, p3, p4, ncol = 2,
-             top = grid::textGrob("Single-Adult vs. Family Homelessness and Rental Costs in Koreatown",
-                                  gp = grid::gpar(fontsize = 16, fontface = "bold")))
-
-cat("Figure saved to: figures/q2_single_vs_family.png\n")
+print(p1)
+print(p2)
+print(p3)
+print(p4)
 ```
 
 ## 5. Summary Statistics and Comprehensive Analysis
@@ -586,169 +511,630 @@ for (metric_name in names(metrics)) {
 cat("\n", paste(rep("=", 100), collapse = ""), "\n")
 ```
 
-```{r viz-heatmap, fig.width=12, fig.height=8}
-# Create comprehensive heatmap showing all correlations
-correlation_data <- data.frame()
 
-for (period in unique(analysis_df$period)) {
-  period_data <- analysis_df %>% filter(period == !!period)
-  
-  if (nrow(period_data) >= 2) {
-    corr_vehicle <- cor(period_data$avg_rent_price, period_data$vehicle_rate, use = "complete.obs")
-    corr_tent <- cor(period_data$avg_rent_price, period_data$tent_rate, use = "complete.obs")
-    corr_street <- cor(period_data$avg_rent_price, period_data$street_rate, use = "complete.obs")
-    corr_single <- cor(period_data$avg_rent_price, period_data$single_adult_rate, use = "complete.obs")
-    corr_family <- ifelse(sum(period_data$totStreetFamMem) > 0,
-                          cor(period_data$avg_rent_price, period_data$family_rate, use = "complete.obs"),
-                          NA)
-    
-    correlation_data <- rbind(correlation_data, data.frame(
-      period = period,
-      Vehicle = corr_vehicle,
-      `Tent/Encampment` = corr_tent,
-      Street = corr_street,
-      `Single Adult` = corr_single,
-      Family = corr_family,
-      check.names = FALSE
-    ))
+## 6. ZIP Code Homelessness Migration Patterns
+
+### Which ZIP Codes Experience the Most Homelessness Growth?
+
+This section analyzes which Koreatown ZIP codes (90004, 90005, 90006, 90010) tend to see increases or concentrations of homelessness over time.
+
+```{r tract-zip-trends}
+# Add ZIP code information to each census tract
+tract_with_zip <- ktown_homeless %>%
+  left_join(ktown_crosswalk %>% select(tract, zip), by = "tract") %>%
+  filter(!is.na(zip))
+
+# Aggregate by census tract, ZIP code, and year
+tract_yearly_trends <- tract_with_zip %>%
+  group_by(tract, zip, year) %>%
+  summarise(
+    tot_homeless_count = sum(tot_homeless_count, na.rm = TRUE),
+    unsheltered_pop_count = sum(unsheltered_pop_count, na.rm = TRUE),
+    tot_vehicles_count = sum(tot_vehicles_count, na.rm = TRUE),
+    tot_tent_encamp_count = sum(tot_tent_encamp_count, na.rm = TRUE),
+    livingonstreet_count = sum(livingonstreet_count, na.rm = TRUE),
+    denom_total_pop = sum(denom_total_pop, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    period = get_covid_period(year),
+    unsheltered_rate = (unsheltered_pop_count / denom_total_pop) * 100000
+  )
+
+# Summary of trends by ZIP code over time
+zip_trends_summary <- tract_yearly_trends %>%
+  group_by(zip, year, period) %>%
+  summarise(
+    num_tracts = n_distinct(tract),
+    total_homeless = sum(tot_homeless_count, na.rm = TRUE),
+    total_unsheltered = sum(unsheltered_pop_count, na.rm = TRUE),
+    total_vehicles = sum(tot_vehicles_count, na.rm = TRUE),
+    total_tents = sum(tot_tent_encamp_count, na.rm = TRUE),
+    total_street = sum(livingonstreet_count, na.rm = TRUE),
+    avg_population = mean(denom_total_pop, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    unsheltered_rate = (total_unsheltered / (num_tracts * avg_population)) * 100000
+  )
+
+cat("ZIP Code Trends Summary:\n")
+print(zip_trends_summary %>% arrange(zip, year))
+```
+
+```{r zip-migration-analysis}
+# Calculate average homelessness growth trajectory for each ZIP
+zip_trajectory <- zip_trends_summary %>%
+  group_by(zip) %>%
+  arrange(year) %>%
+  mutate(
+    homeless_change = total_homeless - lag(total_homeless),
+    unsheltered_change = total_unsheltered - lag(total_unsheltered),
+    vehicles_change = total_vehicles - lag(total_vehicles),
+    tents_change = total_tents - lag(total_tents)
+  ) %>%
+  filter(!is.na(homeless_change))
+
+# Calculate average annual change by ZIP
+avg_change_by_zip <- zip_trajectory %>%
+  group_by(zip) %>%
+  summarise(
+    avg_homeless_change = mean(homeless_change, na.rm = TRUE),
+    avg_unsheltered_change = mean(unsheltered_change, na.rm = TRUE),
+    avg_vehicles_change = mean(vehicles_change, na.rm = TRUE),
+    avg_tents_change = mean(tents_change, na.rm = TRUE),
+    total_years = n(),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(avg_homeless_change))
+
+cat("\n=== Average Annual Change in Homelessness by ZIP Code ===\n")
+cat("(Positive values indicate increasing homelessness)\n\n")
+print(avg_change_by_zip)
+
+# Identify destination ZIP (where homelessness is increasing most)
+destination_zip <- avg_change_by_zip %>%
+  filter(avg_homeless_change == max(avg_homeless_change)) %>%
+  pull(zip)
+
+cat("\n=== PRIMARY DESTINATION ZIP CODE ===\n")
+cat(sprintf("ZIP Code %s shows the highest average annual increase in homelessness\n", destination_zip))
+cat(sprintf("Average increase: %.1f people per year\n", 
+            avg_change_by_zip %>% filter(zip == destination_zip) %>% pull(avg_homeless_change)))
+```
+
+```{r zip-concentration-analysis}
+# Analyze which ZIP has highest concentration in each period
+zip_concentration <- zip_trends_summary %>%
+  group_by(period, zip) %>%
+  summarise(
+    avg_homeless = mean(total_homeless, na.rm = TRUE),
+    avg_unsheltered = mean(total_unsheltered, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Find dominant ZIP in each period
+dominant_zip_by_period <- zip_concentration %>%
+  group_by(period) %>%
+  filter(avg_homeless == max(avg_homeless)) %>%
+  select(period, zip, avg_homeless)
+
+cat("\n=== Dominant ZIP Code by Time Period ===\n")
+print(dominant_zip_by_period)
+
+# Calculate share of total homelessness by ZIP
+zip_share <- zip_trends_summary %>%
+  group_by(year) %>%
+  mutate(
+    total_ktown_homeless = sum(total_homeless, na.rm = TRUE),
+    zip_share_pct = (total_homeless / total_ktown_homeless) * 100
+  ) %>%
+  ungroup()
+
+avg_share_by_zip <- zip_share %>%
+  group_by(zip) %>%
+  summarise(
+    avg_share = mean(zip_share_pct, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(avg_share))
+
+cat("\n=== Average Share of Koreatown Homelessness by ZIP ===\n")
+print(avg_share_by_zip)
+
+# Calculate percent change from Before COVID to After COVID
+zip_period_comparison <- zip_trends_summary %>%
+  group_by(zip, period) %>%
+  summarise(
+    avg_homeless = mean(total_homeless, na.rm = TRUE),
+    avg_unsheltered = mean(total_unsheltered, na.rm = TRUE),
+    avg_vehicles = mean(total_vehicles, na.rm = TRUE),
+    avg_tents = mean(total_tents, na.rm = TRUE),
+    avg_street = mean(total_street, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(zip, period)
+
+zip_change <- zip_period_comparison %>%
+  pivot_wider(names_from = period, values_from = c(avg_homeless, avg_unsheltered, avg_vehicles, avg_tents, avg_street)) %>%
+  mutate(
+    pct_change_homeless = ((`avg_homeless_After COVID (2022+)` - `avg_homeless_Before COVID (2015-2019)`) / `avg_homeless_Before COVID (2015-2019)`) * 100,
+    pct_change_unsheltered = ((`avg_unsheltered_After COVID (2022+)` - `avg_unsheltered_Before COVID (2015-2019)`) / `avg_unsheltered_Before COVID (2015-2019)`) * 100,
+    pct_change_vehicles = ((`avg_vehicles_After COVID (2022+)` - `avg_vehicles_Before COVID (2015-2019)`) / `avg_vehicles_Before COVID (2015-2019)`) * 100,
+    pct_change_tents = ((`avg_tents_After COVID (2022+)` - `avg_tents_Before COVID (2015-2019)`) / `avg_tents_Before COVID (2015-2019)`) * 100
+  )
+
+cat("\nPercent Change from Before COVID to After COVID by ZIP:\n")
+print(zip_change %>% select(zip, starts_with("pct_change")))
+```
+
+```{r viz-growth-trajectory-enhanced}
+# Enhanced Growth Trajectory Visualization
+# Calculate cumulative change to show overall trajectory
+zip_cumulative <- zip_trajectory %>%
+  group_by(zip) %>%
+  arrange(year) %>%
+  mutate(
+    cumulative_change = cumsum(homeless_change),
+    trend_direction = ifelse(homeless_change > 0, "Growth", "Decline")
+  ) %>%
+  ungroup()
+
+# Calculate overall trend for each ZIP
+zip_trend_summary <- zip_trajectory %>%
+  group_by(zip) %>%
+  summarise(
+    total_change = sum(homeless_change, na.rm = TRUE),
+    avg_change = mean(homeless_change, na.rm = TRUE),
+    years_growing = sum(homeless_change > 0, na.rm = TRUE),
+    years_declining = sum(homeless_change < 0, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    net_direction = ifelse(total_change > 0, "Net Destination", "Net Source"),
+    trend_label = sprintf("%s\nNet: %+.0f\nAvg: %+.1f/yr", 
+                          zip, total_change, avg_change)
+  )
+
+cat("\n=== TRAJECTORY SUMMARY ===\n")
+print(zip_trend_summary %>% arrange(desc(total_change)))
+
+# Plot 2: Cumulative Change Over Time
+p2_cumulative <- ggplot(zip_cumulative, aes(x = year, y = cumulative_change, color = zip, group = zip)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40", linewidth = 0.8) +
+  geom_line(linewidth = 2, alpha = 0.8) +
+  geom_point(size = 4) +
+  geom_text(data = zip_cumulative %>% filter(year == max(year)),
+            aes(label = sprintf("%s: %+.0f", zip, cumulative_change)),
+            hjust = -0.1, fontface = "bold", size = 3.5) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Cumulative Change: Which ZIP Codes Have Gained/Lost the Most?",
+    subtitle = "Shows total net change from baseline - upward trend = destination ZIP",
+    x = "Year",
+    y = "Cumulative Change in Homeless Count",
+    color = "ZIP Code"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right"
+  )
+
+ggsave('figures/growth_trajectory_enhanced.png', width = 12, height = 8, dpi = 300)
+# Plot 3: Net Change Summary Bar Chart
+p3_net_change <- ggplot(zip_trend_summary, 
+                        aes(x = reorder(zip, total_change), y = total_change, fill = net_direction)) +
+  geom_bar(stat = "identity", alpha = 0.8, width = 0.7) +
+  geom_text(aes(label = sprintf("%+.0f", total_change)), 
+            hjust = ifelse(zip_trend_summary$total_change > 0, -0.2, 1.2),
+            fontface = "bold", size = 5) +
+  scale_fill_manual(values = c("Net Destination" = "#e74c3c", "Net Source" = "#3498db")) +
+  coord_flip() +
+  labs(
+    title = "Net Change in Homelessness by ZIP Code (Total Period)",
+    subtitle = "Positive = Destination ZIP (gaining homeless population)",
+    x = "ZIP Code",
+    y = "Total Net Change in Homeless Count",
+    fill = "Classification"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "top",
+    axis.text.y = element_text(size = 12, face = "bold")
+  )
+
+print(p2_cumulative)
+print(p3_net_change)
+
+cat("\nFigure saved to: figures/growth_trajectory_enhanced.png\n")
+
+# Print interpretation
+cat("\n=== INTERPRETATION ===\n")
+destination_zips <- zip_trend_summary %>% filter(total_change > 0) %>% arrange(desc(total_change))
+if (nrow(destination_zips) > 0) {
+  cat("\nDESTINATION ZIP CODES (Net Growth):\n")
+  for (i in 1:nrow(destination_zips)) {
+    cat(sprintf("  %d. ZIP %s: +%.0f homeless (Avg: %+.1f/year, %d years growing)\n",
+                i, 
+                destination_zips$zip[i],
+                destination_zips$total_change[i],
+                destination_zips$avg_change[i],
+                destination_zips$years_growing[i]))
   }
 }
 
-# Create matrix for heatmap
-corr_matrix <- as.matrix(correlation_data[, -1])
-rownames(corr_matrix) <- gsub(" ", "\n", correlation_data$period)
-
-# Melt for ggplot
-corr_melted <- melt(corr_matrix)
-names(corr_melted) <- c("Period", "Category", "Correlation")
-
-ggplot(corr_melted, aes(x = Category, y = Period, fill = Correlation)) +
-  geom_tile(color = "white", linewidth = 2) +
-  geom_text(aes(label = sprintf("%.3f", Correlation)), size = 5) +
-  scale_fill_gradient2(low = "#d73027", mid = "#ffffbf", high = "#1a9850",
-                       midpoint = 0, limit = c(-1, 1),
-                       name = "Correlation\nCoefficient") +
-  labs(title = "Correlation: Rental Prices vs. Homelessness Rates (per 100k) by COVID Period",
-       x = "Homelessness Category",
-       y = "COVID Period") +
-  theme_minimal() +
-  theme(plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
-        axis.title = element_text(face = "bold", size = 13),
-        axis.text.x = element_text(size = 11),
-        axis.text.y = element_text(size = 11))
-
-ggsave('figures/correlation_heatmap.png', width = 12, height = 8, dpi = 300)
-cat("Figure saved to: figures/correlation_heatmap.png\n")
+source_zips <- zip_trend_summary %>% filter(total_change < 0) %>% arrange(total_change)
+if (nrow(source_zips) > 0) {
+  cat("\nSOURCE ZIP CODES (Net Decline):\n")
+  for (i in 1:nrow(source_zips)) {
+    cat(sprintf("  %d. ZIP %s: %.0f homeless (Avg: %+.1f/year, %d years declining)\n",
+                i,
+                source_zips$zip[i],
+                source_zips$total_change[i],
+                source_zips$avg_change[i],
+                source_zips$years_declining[i]))
+  }
+}
 ```
 
-```{r viz-comprehensive, fig.width=18, fig.height=10, warning=FALSE}
-# Create a combined visualization showing rental price changes and homelessness trends
-# Note: This is a simplified version of the Python comprehensive plot
-# R's grid system can be used for more complex layouts if needed
-
-# Main dual-axis plot
-p_main <- ggplot(analysis_df, aes(x = year)) +
-  geom_ribbon(aes(ymin = 0, ymax = avg_rent_price / 50), fill = "#e74c3c", alpha = 0.2) +
-  geom_line(aes(y = avg_rent_price / 50, color = "Rental Price"), linewidth = 2) +
-  geom_point(aes(y = avg_rent_price / 50, color = "Rental Price"), size = 5) +
-  geom_ribbon(aes(ymin = 0, ymax = unsheltered_pop_count), fill = "#3498db", alpha = 0.2) +
-  geom_line(aes(y = unsheltered_pop_count, color = "Unsheltered"), linewidth = 2) +
-  geom_point(aes(y = unsheltered_pop_count, color = "Unsheltered"), size = 5, shape = 15) +
-  scale_color_manual(values = c("Rental Price" = "#e74c3c", "Unsheltered" = "#3498db")) +
-  scale_y_continuous(
-    name = "Unsheltered Homelessness Count",
-    sec.axis = sec_axis(~.*50, name = "Average Rental Price ($)")
+```{r viz-migration-patterns}
+# Original visualization kept for reference
+p_growth_trajectory <- ggplot(zip_trajectory, aes(x = year, y = homeless_change, color = zip, group = zip)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Annual Change in Homelessness by ZIP Code",
+    subtitle = "Positive values indicate growth; negative values indicate decline",
+    x = "Year",
+    y = "Annual Change in Total Homeless Count",
+    color = "ZIP Code"
   ) +
-  labs(x = "Year",
-       title = "Koreatown: Rental Prices and Unsheltered Homelessness Trends") +
   theme_minimal() +
-  theme(plot.title = element_text(face = "bold", size = 16),
-        legend.title = element_blank(),
-        legend.position = "top")
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right"
+  )
 
-# Category breakdowns
-p_vehicle <- ggplot(analysis_df, aes(x = factor(year), y = tot_vehicles_count, fill = period)) +
-  geom_bar(stat = "identity", alpha = 0.7) +
-  scale_fill_manual(values = period_colors) +
-  labs(x = "Year", y = "Count", title = "Vehicle Homelessness") +
+# Share over time
+p_share_evolution <- ggplot(zip_share, aes(x = year, y = zip_share_pct, fill = zip)) +
+  geom_area(alpha = 0.7) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(
+    title = "Share of Koreatown Homelessness by ZIP Code Over Time",
+    x = "Year",
+    y = "Percentage of Total Koreatown Homelessness",
+    fill = "ZIP Code"
+  ) +
   theme_minimal() +
-  theme(plot.title = element_text(face = "bold", size = 12),
-        legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1))
-ggsave('figures/vehicle.png')
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right"
+  )
 
-p_tent <- ggplot(analysis_df, aes(x = factor(year), y = tot_tent_encamp_count, fill = period)) +
-  geom_bar(stat = "identity", alpha = 0.7) +
-  scale_fill_manual(values = period_colors) +
-  labs(x = "Year", y = "Count", title = "Tent/Encampment") +
+# Time series by ZIP code
+p_zip_unsheltered <- ggplot(zip_trends_summary, aes(x = year, y = total_unsheltered, color = zip, group = zip)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Unsheltered Homelessness Trends by ZIP Code",
+    x = "Year",
+    y = "Total Unsheltered Count",
+    color = "ZIP Code"
+  ) +
   theme_minimal() +
-  theme(plot.title = element_text(face = "bold", size = 12),
-        legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1))
-ggsave('figures/tent.png')
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right"
+  )
 
-p_street <- ggplot(analysis_df, aes(x = factor(year), y = livingonstreet_count, fill = period)) +
-  geom_bar(stat = "identity", alpha = 0.7) +
-  scale_fill_manual(values = period_colors) +
-  labs(x = "Year", y = "Count", title = "Street Homelessness") +
+p_zip_vehicles <- ggplot(zip_trends_summary, aes(x = year, y = total_vehicles, color = zip, group = zip)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Vehicle Homelessness Trends by ZIP Code",
+    x = "Year",
+    y = "Total Vehicle Count",
+    color = "ZIP Code"
+  ) +
   theme_minimal() +
-  theme(plot.title = element_text(face = "bold", size = 12),
-        legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1))
-ggsave('figures/street.png')
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right"
+  )
 
-# Single vs Family trend
-p_single_family <- ggplot(analysis_df, aes(x = year)) +
-  geom_line(aes(y = totStreetSingAdult, color = "Single Adults"), linewidth = 1.5) +
-  geom_point(aes(y = totStreetSingAdult, color = "Single Adults"), size = 4) +
-  geom_line(aes(y = totStreetFamMem, color = "Family Members"), linewidth = 1.5) +
-  geom_point(aes(y = totStreetFamMem, color = "Family Members"), size = 4, shape = 15) +
-  scale_color_manual(values = c("Single Adults" = "#9b59b6", "Family Members" = "#f39c12")) +
-  labs(x = "Year", y = "Count", title = "Single-Adult vs. Family Homelessness") +
+# Bar chart of average change
+p_avg_change <- ggplot(avg_change_by_zip, aes(x = reorder(zip, avg_homeless_change), y = avg_homeless_change, fill = zip)) +
+  geom_bar(stat = "identity", alpha = 0.8) +
+  geom_text(aes(label = sprintf("%.1f", avg_homeless_change)), 
+            hjust = ifelse(avg_change_by_zip$avg_homeless_change > 0, -0.2, 1.2),
+            fontface = "bold") +
+  scale_fill_brewer(palette = "Set1") +
+  coord_flip() +
+  labs(
+    title = "Average Annual Change in Homelessness by ZIP Code",
+    x = "ZIP Code",
+    y = "Average Annual Change (people/year)",
+    fill = "ZIP Code"
+  ) +
   theme_minimal() +
-  theme(plot.title = element_text(face = "bold", size = 12),
-        legend.title = element_blank(),
-        legend.position = "bottom")
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  )
 
-# Arrange all plots
-layout_matrix <- rbind(c(1, 1, 1),
-                       c(2, 3, 4),
-                       c(5, 5, 5))
+# Heatmap of change by ZIP
+if (nrow(zip_change) > 0) {
+  p_heatmap <- ggplot(
+    zip_change %>% 
+      select(zip, starts_with("pct_change")) %>%
+      pivot_longer(cols = starts_with("pct_change"), names_to = "metric", values_to = "pct_change") %>%
+      mutate(metric = gsub("pct_change_", "", metric)),
+    aes(x = metric, y = zip, fill = pct_change)
+  ) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = sprintf("%.1f%%", pct_change)), color = "white", fontface = "bold") +
+    scale_fill_gradient2(low = "#2ecc71", mid = "white", high = "#e74c3c", midpoint = 0) +
+    labs(
+      title = "Percent Change in Homelessness: Before COVID → After COVID",
+      x = "Metric",
+      y = "ZIP Code",
+      fill = "% Change"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+} else {
+  p_heatmap <- ggplot() + labs(title = "Insufficient data for heatmap")
+}
 
-grid.arrange(p_main, p_vehicle, p_tent, p_street, p_single_family,
-             layout_matrix = layout_matrix,
-             top = grid::textGrob("Comprehensive Analysis: Koreatown Homelessness and Rental Costs",
-                                  gp = grid::gpar(fontsize = 18, fontface = "bold")))
-
-ggsave('figures/comprehensive_analysis.png', width = 18, height = 10, dpi = 300)
-cat("Figure saved to: figures/comprehensive_analysis.png\n")
+print(p_growth_trajectory)
+print(p_share_evolution)
+print(p_zip_unsheltered)
+print(p_zip_vehicles)
 ```
 
-## 6. Key Findings and Conclusions
+```{r tract-ranking}
+# Identify which ZIP codes had the highest increases
+cat("\n=== ZIP Code Rankings by Homelessness Growth ===\n\n")
 
-### Research Question 1: Rental Costs vs. Unsheltered Homelessness Categories
+zip_ranking <- zip_change %>%
+  select(zip, starts_with("pct_change")) %>%
+  arrange(desc(pct_change_homeless))
 
-**Key Findings:** - The analysis examines the relationship between
-rental housing costs and three categories of unsheltered homelessness
-(vehicle, tent/encampment, street) across three COVID periods -
-Correlation coefficients and trend visualizations reveal how different
-types of unsheltered homelessness respond to rental price changes -
-Time-series graphs show the evolution of each category before, during,
-and after COVID-19
+cat("ZIP Codes Ranked by Total Homeless Growth:\n")
+print(zip_ranking)
 
-### Research Question 2: Single-Adult vs. Family Homelessness
+# Most affected census tracts
+top_tracts <- tract_yearly_trends %>%
+  filter(period == "After COVID (2022+)") %>%
+  group_by(tract, zip) %>%
+  summarise(
+    avg_homeless = mean(tot_homeless_count, na.rm = TRUE),
+    avg_unsheltered_rate = mean(unsheltered_rate, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(avg_homeless)) %>%
+  head(10)
 
-**Key Findings:** - Comparison of how rental costs affected single-adult
-versus family homelessness differently across COVID periods - Ratio
-analysis shows the relative prevalence of single adults compared to
-families - Correlation analysis reveals whether single adults or
-families were more vulnerable to rental price increases
+cat("\nTop 10 Census Tracts by Homelessness (After COVID):\n")
+print(top_tracts)
+```
 
-### Overall Insights:
+### Spatial Distribution by ZIP Code
 
--   Visual evidence from scatter plots and time series shows trends
-    across different periods
--   The heatmap provides a comprehensive view of all correlations at a
-    glance
--   Period-specific analysis reveals how the pandemic may have altered
-    the relationship between housing costs and homelessness
+```{r spatial-distribution-data}
+# Prepare spatial distribution data for each ZIP code
+# Calculate distribution metrics by ZIP and period
+spatial_dist <- tract_yearly_trends %>%
+  group_by(zip, period) %>%
+  summarise(
+    num_tracts = n_distinct(tract),
+    total_homeless = sum(tot_homeless_count, na.rm = TRUE),
+    total_unsheltered = sum(unsheltered_pop_count, na.rm = TRUE),
+    total_vehicles = sum(tot_vehicles_count, na.rm = TRUE),
+    total_tents = sum(tot_tent_encamp_count, na.rm = TRUE),
+    total_street = sum(livingonstreet_count, na.rm = TRUE),
+    avg_per_tract_homeless = mean(tot_homeless_count, na.rm = TRUE),
+    avg_per_tract_unsheltered = mean(unsheltered_pop_count, na.rm = TRUE),
+    sd_per_tract_homeless = sd(tot_homeless_count, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+cat("\n=== Spatial Distribution by ZIP Code and Period ===\n")
+print(spatial_dist)
+
+# Calculate concentration index (coefficient of variation)
+spatial_dist <- spatial_dist %>%
+  mutate(
+    concentration_index = sd_per_tract_homeless / avg_per_tract_homeless,
+    concentration_category = case_when(
+      is.na(concentration_index) | is.infinite(concentration_index) ~ "Insufficient Data",
+      concentration_index < 0.5 ~ "Low Concentration (Evenly Distributed)",
+      concentration_index < 1.0 ~ "Moderate Concentration",
+      TRUE ~ "High Concentration (Clustered)"
+    )
+  )
+
+cat("\n=== Concentration Analysis ===\n")
+cat("Concentration Index: Higher values indicate homelessness is concentrated in fewer tracts\n\n")
+print(spatial_dist %>% select(zip, period, num_tracts, concentration_index, concentration_category))
+```
+
+
+```{r viz-spatial-boxplots}
+# Box plots showing distribution within each ZIP code
+p_dist_homeless <- ggplot(tract_yearly_trends, 
+                          aes(x = factor(zip), y = tot_homeless_count, fill = period)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 2) +
+  scale_fill_manual(values = period_colors) +
+  labs(
+    title = "Distribution of Homelessness Across Census Tracts by ZIP Code",
+    x = "ZIP Code",
+    y = "Total Homeless Count per Tract",
+    fill = "Period"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+p_dist_unsheltered <- ggplot(tract_yearly_trends, 
+                             aes(x = factor(zip), y = unsheltered_pop_count, fill = period)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 2) +
+  scale_fill_manual(values = period_colors) +
+  labs(
+    title = "Distribution of Unsheltered Population Across Census Tracts by ZIP Code",
+    x = "ZIP Code",
+    y = "Unsheltered Count per Tract",
+    fill = "Period"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+p_dist_vehicles <- ggplot(tract_yearly_trends, 
+                          aes(x = factor(zip), y = tot_vehicles_count, fill = period)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 2) +
+  scale_fill_manual(values = period_colors) +
+  labs(
+    title = "Distribution of Vehicle Homelessness Across Census Tracts by ZIP Code",
+    x = "ZIP Code",
+    y = "Vehicle Count per Tract",
+    fill = "Period"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+# grid.arrange(p_dist_homeless, p_dist_unsheltered, p_dist_vehicles, ncol = 1,
+#              top = grid::textGrob("Spatial Distribution: Homelessness Across Census Tracts",
+#                                   gp = grid::gpar(fontsize = 16, fontface = "bold")))
+print(p_dist_homeless)
+print(p_dist_unsheltered)
+print(p_dist_vehicles)
+```
+
+```{r viz-spatial-concentration}
+# Visualization of concentration index by ZIP code
+p_concentration <- ggplot(spatial_dist %>% filter(!is.na(concentration_index), !is.infinite(concentration_index)), 
+                          aes(x = zip, y = concentration_index, fill = period)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "blue", linewidth = 0.8) +
+  geom_hline(yintercept = 1.0, linetype = "dashed", color = "red", linewidth = 0.8) +
+  scale_fill_manual(values = period_colors) +
+  labs(
+    title = "Concentration Index by ZIP Code and Period",
+    subtitle = "Higher values = more concentrated in fewer tracts; Lower values = more evenly distributed",
+    x = "ZIP Code",
+    y = "Concentration Index (Coefficient of Variation)",
+    fill = "Period"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "bottom"
+  ) +
+  annotate("text", x = 0.5, y = 0.5, label = "Even Distribution", 
+           angle = 0, vjust = -0.5, color = "blue", size = 3) +
+  annotate("text", x = 0.5, y = 1.0, label = "High Concentration", 
+           angle = 0, vjust = -0.5, color = "red", size = 3)
+
+print(p_concentration)
+```
+
+```{r viz-spatial-ridgeline}
+# Ridge plots showing distribution density by ZIP code (if ggridges is available)
+# Install ggridges if not already installed
+if (!require("ggridges", quietly = TRUE)) {
+  install.packages("ggridges")
+  library(ggridges)
+}
+
+p_ridge_homeless <- ggplot(tract_yearly_trends, 
+                           aes(x = tot_homeless_count, y = factor(zip), fill = zip)) +
+  geom_density_ridges(alpha = 0.7, scale = 2) +
+  scale_fill_brewer(palette = "Set1") +
+  facet_wrap(~ period, ncol = 1) +
+  labs(
+    title = "Density Distribution of Homelessness Across Census Tracts by ZIP Code",
+    x = "Total Homeless Count per Tract",
+    y = "ZIP Code",
+    fill = "ZIP Code"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  )
+
+print(p_ridge_homeless)
+```
+
+```{r spatial-summary-stats}
+# Summary statistics for spatial distribution
+cat("\n=== SPATIAL DISTRIBUTION SUMMARY ===\n\n")
+
+for (z in unique(spatial_dist$zip)) {
+  cat(paste0("\n", strrep("=", 60), "\n"))
+  cat(paste0("ZIP CODE: ", z, "\n"))
+  cat(paste0(strrep("=", 60), "\n\n"))
+  
+  zip_data <- spatial_dist %>% filter(zip == z)
+  
+  for (p in unique(zip_data$period)) {
+    period_data <- zip_data %>% filter(period == p)
+    
+    cat(paste0(p, ":\n"))
+    cat(sprintf("  Number of Census Tracts: %d\n", period_data$num_tracts))
+    cat(sprintf("  Total Homeless: %d\n", period_data$total_homeless))
+    cat(sprintf("  Average per Tract: %.1f\n", period_data$avg_per_tract_homeless))
+    cat(sprintf("  Std Deviation: %.1f\n", period_data$sd_per_tract_homeless))
+    cat(sprintf("  Concentration Index: %.2f (%s)\n", 
+                period_data$concentration_index, 
+                period_data$concentration_category))
+    cat("\n")
+  }
+}
+
+cat(paste0(strrep("=", 60), "\n"))
+```
+
+### Key Findings Summary
+
+**Homelessness Destination Trends:**
+
+1. **Primary Destination ZIP**: The analysis identifies which ZIP code experiences the highest average annual increase in homelessness, indicating where unsheltered individuals tend to concentrate over time.
+
+2. **Period-Specific Patterns**: Different ZIP codes may dominate during different periods (Before COVID, During COVID, After COVID), revealing how displacement patterns shifted during the pandemic.
+
+3. **Share Evolution**: By tracking each ZIP's share of total Koreatown homelessness over time, we can see whether homelessness is concentrating in specific areas or spreading more evenly.
+
+4. **Growth Trajectories**: Year-over-year changes show which ZIP codes are experiencing sustained growth versus temporary spikes or declines in homelessness.
+
+5. **Spatial Distribution**: The concentration index reveals whether homelessness is clustered in a few census tracts or spread more evenly across each ZIP code. Box plots and heatmaps visualize the geographic distribution patterns.
+
+**Implications:**
+- ZIP codes with consistent positive growth may need targeted interventions and resources
+- Understanding destination patterns helps allocate services where they're most needed
+- Identifies whether homelessness is clustering in specific neighborhoods or dispersing across Koreatown
+- High concentration indices indicate specific census tracts that need focused attention
+- Even distribution may require broader, ZIP-wide intervention strategies
+
+
